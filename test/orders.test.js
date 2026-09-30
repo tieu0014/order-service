@@ -7,7 +7,7 @@ const vm = require('node:vm');
 
 // Control broker callbacks/events independently to reproduce their ordering.
 // Run the actual entrypoint without opening a port or requiring a live broker.
-function request() {
+function request(env = {}) {
   const state = { replies: [], published: [], logs: [], closes: 0 };
   const connection = new EventEmitter();
   const channel = new EventEmitter();
@@ -17,11 +17,11 @@ function request() {
       assert.equal(route, '/orders');
       state.handler = handler;
     },
-    listen() {}
+    listen(port) { state.port = port; }
   };
   const express = () => app;
   express.json = () => () => {};
-  const amqp = { connect(url, callback) { state.connect = callback; } };
+  const amqp = { connect(url, callback) { state.url = url; state.connect = callback; } };
   connection.createConfirmChannel = (callback) => { state.open = callback; return channel; };
   connection.close = (callback) => {
     state.closes++;
@@ -43,9 +43,11 @@ function request() {
     require(name) {
       if (name === 'express') return express;
       if (name === 'cors') return () => () => {};
+      if (name === 'dotenv') return { config() {} };
       if (name === 'amqplib/callback_api') return amqp;
       throw new Error(`Unexpected import: ${name}`);
     },
+    process: { env },
     Buffer,
     console: {
       log: (...args) => state.logs.push(args),
@@ -177,3 +179,24 @@ for (const event of ['error', 'close']) {
     assert.equal(state.published.length, 0);
   });
 }
+
+
+test('uses local defaults when deployment configuration is absent', () => {
+  const state = request();
+  assert.equal(state.url, 'amqp://localhost');
+  assert.equal(state.port, 3000);
+});
+
+test('uses the configured external broker and listening port', () => {
+  const env = {
+    RABBITMQ_CONNECTION_STRING: 'amqp://labuser:example@10.0.0.4:5672/',
+    PORT: '3100'
+  };
+  const state = request(env);
+  assert.equal(state.url, env.RABBITMQ_CONNECTION_STRING);
+  assert.equal(state.port, env.PORT);
+  state.ready();
+  state.confirm(null);
+  assert.deepEqual(state.replies, [{ code: 200, text: 'Order received' }]);
+  assert.equal(state.closes, 1);
+});
